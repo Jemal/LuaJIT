@@ -11,3 +11,5 @@
 .tags
 
 !lib/unix/libluajit.a
+!lib/win32/*.lib
+!lib/win64/*.lib
