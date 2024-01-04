@@ -976,6 +976,7 @@ void lj_record_ret(jit_State *J, BCReg rbase, ptrdiff_t gotresults)
       emitir(IRTG(IR_RETF, IRT_PGC), trpt, trpc);
       J->retdepth++;
       J->needsnap = 1;
+      J->scev.idx = REF_NIL;
       lj_assertJ(J->baseslot == 1+LJ_FR2, "bad baseslot for return");
       /* Shift result slots up and clear the slots of the new frame below. */
       memmove(J->base + cbase, J->base-1-LJ_FR2, sizeof(TRef)*nresults);
@@ -1772,16 +1773,16 @@ noconstify:
   /* Note: this effectively limits LJ_MAX_UPVAL to 127. */
   uv = (uv << 8) | (hashrot(uvp->dhash, uvp->dhash + HASH_BIAS) & 0xff);
   if (!uvp->closed) {
-    uref = tref_ref(emitir(IRTG(IR_UREFO, IRT_PGC), fn, uv));
     /* In current stack? */
     if (uvval(uvp) >= tvref(J->L->stack) &&
 	uvval(uvp) < tvref(J->L->maxstack)) {
       int32_t slot = (int32_t)(uvval(uvp) - (J->L->base - J->baseslot));
       if (slot >= 0) {  /* Aliases an SSA slot? */
+	uref = tref_ref(emitir(IRT(IR_UREFO, IRT_PGC), fn, uv));
 	emitir(IRTG(IR_EQ, IRT_PGC),
 	       REF_BASE,
 	       emitir(IRT(IR_ADD, IRT_PGC), uref,
-		      lj_ir_kint(J, (slot - 1 - LJ_FR2) * -8)));
+		      lj_ir_kintpgc(J, (slot - 1 - LJ_FR2) * -8)));
 	slot -= (int32_t)J->baseslot;  /* Note: slot number may be negative! */
 	if (val == 0) {
 	  return getslot(J, slot);
@@ -1792,12 +1793,21 @@ noconstify:
 	}
       }
     }
+    /* IR_UREFO+IRT_IGC is not checked for open-ness at runtime.
+    ** Always marked as a guard, since it might get promoted to IRT_PGC later.
+    */
+    uref = emitir(IRTG(IR_UREFO, tref_isgcv(val) ? IRT_PGC : IRT_IGC), fn, uv);
+    uref = tref_ref(uref);
     emitir(IRTG(IR_UGT, IRT_PGC),
 	   emitir(IRT(IR_SUB, IRT_PGC), uref, REF_BASE),
-	   lj_ir_kint(J, (J->baseslot + J->maxslot) * 8));
+	   lj_ir_kintpgc(J, (J->baseslot + J->maxslot) * 8));
   } else {
+    /* If fn is constant, then so is the GCupval*, and the upvalue cannot
+    ** transition back to open, so no guard is required in this case.
+    */
+    IRType t = (tref_isk(fn) ? 0 : IRT_GUARD) | IRT_PGC;
+    uref = tref_ref(emitir(IRT(IR_UREFC, t), fn, uv));
     needbarrier = 1;
-    uref = tref_ref(emitir(IRTG(IR_UREFC, IRT_PGC), fn, uv));
   }
   if (val == 0) {  /* Upvalue load */
     IRType t = itype2irt(uvval(uvp));
@@ -1972,7 +1982,8 @@ static void rec_varg(jit_State *J, BCReg dst, ptrdiff_t nresults)
 	  emitir(IRTGI(IR_EQ), fr,
 		 lj_ir_kint(J, (int32_t)frame_ftsz(J->L->base-1)));
 	vbase = emitir(IRT(IR_SUB, IRT_IGC), REF_BASE, fr);
-	vbase = emitir(IRT(IR_ADD, IRT_PGC), vbase, lj_ir_kint(J, frofs-8*(1+LJ_FR2)));
+	vbase = emitir(IRT(IR_ADD, IRT_PGC), vbase,
+		       lj_ir_kintpgc(J, frofs-8*(1+LJ_FR2)));
 	for (i = 0; i < nload; i++) {
 	  IRType t = itype2irt(&J->L->base[i-1-LJ_FR2-nvararg]);
 	  J->base[dst+i] = lj_record_vload(J, vbase, (MSize)i, t);
@@ -1991,8 +2002,11 @@ static void rec_varg(jit_State *J, BCReg dst, ptrdiff_t nresults)
       TRef tr = TREF_NIL;
       ptrdiff_t idx = lj_ffrecord_select_mode(J, tridx, &J->L->base[dst-1]);
       if (idx < 0) goto nyivarg;
-      if (idx != 0 && !tref_isinteger(tridx))
+      if (idx != 0 && !tref_isinteger(tridx)) {
+	if (tref_isstr(tridx))
+	  tridx = emitir(IRTG(IR_STRTO, IRT_NUM), tridx, 0);
 	tridx = emitir(IRTGI(IR_CONV), tridx, IRCONV_INT_NUM|IRCONV_INDEX);
+      }
       if (idx != 0 && tref_isk(tridx)) {
 	emitir(IRTGI(idx <= nvararg ? IR_GE : IR_LT),
 	       fr, lj_ir_kint(J, frofs+8*(int32_t)idx));
@@ -2020,7 +2034,7 @@ static void rec_varg(jit_State *J, BCReg dst, ptrdiff_t nresults)
 	IRType t;
 	TRef aref, vbase = emitir(IRT(IR_SUB, IRT_IGC), REF_BASE, fr);
 	vbase = emitir(IRT(IR_ADD, IRT_PGC), vbase,
-		       lj_ir_kint(J, frofs-(8<<LJ_FR2)));
+		       lj_ir_kintpgc(J, frofs-(8<<LJ_FR2)));
 	t = itype2irt(&J->L->base[idx-2-LJ_FR2-nvararg]);
 	aref = emitir(IRT(IR_AREF, IRT_PGC), vbase, tridx);
 	tr = lj_record_vload(J, aref, 0, t);
