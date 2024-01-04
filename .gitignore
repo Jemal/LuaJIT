@@ -11,5 +11,7 @@
 .tags
 
 !lib/unix/libluajit.a
-!lib/win32/*.lib
-!lib/win64/*.lib
+!lib/win32/debug/*.lib
+!lib/win32/release/*.lib
+!lib/win64/debug/*.lib
+!lib/win64/release/*.lib
